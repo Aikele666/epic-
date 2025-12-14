@@ -1,14 +1,13 @@
 import requests
 import os
-from datetime import datetime
-import html  # 用于转义 HTML 特殊字符，防止报错
+from datetime import datetime, timedelta
+import html
 
 # 1. 获取 GitHub Secrets
 BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
 CHAT_ID = os.environ.get("TG_CHAT_ID")
 
 def get_epic_free_games():
-    # 直接请求英文数据，速度最快，图片最全
     url = "https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions?locale=en-US"
     try:
         res = requests.get(url).json()
@@ -16,48 +15,68 @@ def get_epic_free_games():
         
         free_games = []
         for game in games:
-            # 1. 基础过滤：必须有促销信息
+            # 1. 基础过滤
             promotions = game.get('promotions')
-            if not promotions:
-                continue
+            if not promotions: continue
+            if not promotions.get('promotionalOffers'): continue
             
-            if not promotions.get('promotionalOffers'):
-                continue
-            
-            # 【重要】注释掉类型过滤，确保能抓到霍格沃茨之遗等大作
-            # offer_type = game.get('offerType')
-            # if offer_type and offer_type != 'BASE_GAME':
-            #     continue
-
-            # 2. 检查价格是否为 0
             offers = promotions['promotionalOffers']
-            if not offers:
-                continue
+            if not offers: continue
 
             is_free = False
             end_date_str = "未知"
+            is_new_game = False # 标记是否为新上架的游戏
 
             for offer_group in offers:
                 for offer in offer_group['promotionalOffers']:
                     if offer['discountSetting']['discountPercentage'] == 0:
                         is_free = True
-                        raw_date = offer.get('endDate')
-                        if raw_date:
+                        
+                        # Time formatting
+                        raw_end_date = offer.get('endDate')
+                        raw_start_date = offer.get('startDate') # 获取开始时间
+                        
+                        # 处理截止时间
+                        if raw_end_date:
                             try:
-                                # 格式化时间
-                                dt = datetime.strptime(raw_date.split('.')[0], "%Y-%m-%dT%H:%M:%S")
-                                end_date_str = dt.strftime("%Y-%m-%d %H:%M") + " (UTC)"
+                                dt_end = datetime.strptime(raw_end_date.split('.')[0], "%Y-%m-%dT%H:%M:%S")
+                                end_date_str = dt_end.strftime("%Y-%m-%d %H:%M") + " (UTC)"
                             except:
-                                end_date_str = raw_date
+                                end_date_str = raw_end_date
+                        
+                        # 【核心逻辑】判断游戏是否“刚上架”
+                        # 只有在促销开始的 28 小时内检测到，才算“新消息”并推送。
+                        # 28小时是为了容错（GitHub Action 可能会排队延迟几分钟）
+                        if raw_start_date:
+                            try:
+                                dt_start = datetime.strptime(raw_start_date.split('.')[0], "%Y-%m-%dT%H:%M:%S")
+                                # 获取当前 UTC 时间
+                                now = datetime.utcnow()
+                                # 计算时间差
+                                time_diff = now - dt_start
+                                
+                                # 如果时间差小于 28 小时，说明是刚出的新游戏 -> 推送
+                                # 如果时间差大于 28 小时，说明是昨天的旧消息 -> 不推送
+                                if time_diff < timedelta(hours=28):
+                                    is_new_game = True
+                                else:
+                                    print(f"跳过旧游戏: {game.get('title')} (已上架 {time_diff})")
+                            except Exception as e:
+                                print(f"时间解析错误: {e}")
+                                # 如果时间解析失败，为了保险起见，默认它是新的，防止漏发
+                                is_new_game = True
+                        else:
+                            is_new_game = True # 没有开始时间的数据，默认发送
+                        
                         break
             
-            if is_free:
+            # 只有当它是免费 且 是新上架的游戏时，才加入列表
+            if is_free and is_new_game:
                 title = game.get('title')
                 description = game.get('description', '暂无描述')
                 slug = game.get('productSlug') or game.get('urlSlug')
                 link = f"https://store.epicgames.com/p/{slug}" if slug else "https://store.epicgames.com/free-games"
                 
-                # 获取封面图
                 image_url = ""
                 for img in game.get('keyImages', []):
                     if img.get('type') == 'Thumbnail':
@@ -89,7 +108,7 @@ def send_telegram_message(message):
     payload = {
         "chat_id": CHAT_ID,
         "text": message,
-        "parse_mode": "HTML",  # 使用 HTML 模式，稳定且支持格式
+        "parse_mode": "HTML", 
         "disable_web_page_preview": False
     }
     try:
@@ -98,13 +117,12 @@ def send_telegram_message(message):
         print(f"❌ 推送错误: {e}")
 
 if __name__ == "__main__":
-    print("⏳ 开始检查 Epic 免费游戏...")
+    print("⏳ 开始检查 Epic 免费游戏 (每日去重版)...")
     games = get_epic_free_games()
     
     if games:
-        print(f"🎉 发现 {len(games)} 个免费游戏")
+        print(f"🎉 发现 {len(games)} 个新上架的免费游戏")
         for g in games:
-            # 简单转义，防止标题里有 & < > 等符号导致发送失败
             safe_title = html.escape(g['title'])
             safe_desc = html.escape(g['description'])
             
@@ -117,6 +135,5 @@ if __name__ == "__main__":
                 f"🔗 <a href='{g['link']}'>点击领取游戏</a>"
             )
             send_telegram_message(msg)
-            print(f"已推送: {safe_title}")
     else:
-        print("🤷‍♂️ 当前没有检测到免费游戏")
+        print("🤷‍♂️ 今天没有新上架的免费游戏 (可能是旧游戏已通知过)")
