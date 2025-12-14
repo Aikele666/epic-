@@ -1,6 +1,7 @@
 import requests
 import os
 from datetime import datetime
+import html  # 用于转义 HTML 特殊字符
 
 # 1. 获取 GitHub Secrets
 BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
@@ -14,38 +15,33 @@ def get_epic_free_games():
         
         free_games = []
         for game in games:
-            # ---------------- 过滤逻辑 ----------------
-            # 1. 跳过没有促销信息的
+            # 1. 基础过滤：必须有促销信息
             promotions = game.get('promotions')
             if not promotions:
                 continue
             
-            # 2. 跳过没有当前优惠的
             if not promotions.get('promotionalOffers'):
                 continue
             
-            # 3. 【新】只保留游戏本体 (BASE_GAME)，过滤掉 DLC
-            # 如果 offerType 为空也保留，防止漏掉某些特殊游戏
-            offer_type = game.get('offerType')
-            if offer_type and offer_type != 'BASE_GAME':
-                continue
+            # 【注意】我注释掉了 offerType 过滤，防止霍格沃茨被误杀
+            # offer_type = game.get('offerType')
+            # if offer_type and offer_type != 'BASE_GAME':
+            #     continue
 
-            # 4. 检查价格是否为 0
+            # 2. 检查价格是否为 0
             offers = promotions['promotionalOffers']
             if not offers:
                 continue
 
             is_free = False
-            end_date_str = "未知" # 截止时间
+            end_date_str = "未知"
 
             for offer_group in offers:
                 for offer in offer_group['promotionalOffers']:
                     if offer['discountSetting']['discountPercentage'] == 0:
                         is_free = True
-                        # 提取截止时间
                         raw_date = offer.get('endDate')
                         if raw_date:
-                            # 简单格式化时间：2025-12-14T16:00:00.000Z -> 2025-12-14 16:00
                             try:
                                 dt = datetime.strptime(raw_date.split('.')[0], "%Y-%m-%dT%H:%M:%S")
                                 end_date_str = dt.strftime("%Y-%m-%d %H:%M") + " (UTC)"
@@ -53,16 +49,12 @@ def get_epic_free_games():
                                 end_date_str = raw_date
                         break
             
-            # ---------------- 提取信息 ----------------
             if is_free:
                 title = game.get('title')
                 description = game.get('description', '暂无描述')
-                
-                # 获取链接 slug
                 slug = game.get('productSlug') or game.get('urlSlug')
                 link = f"https://store.epicgames.com/p/{slug}" if slug else "https://store.epicgames.com/free-games"
                 
-                # 【新】获取封面图片 (优先找 Thumbnail，没有就找 Wide)
                 image_url = ""
                 for img in game.get('keyImages', []):
                     if img.get('type') == 'Thumbnail':
@@ -94,8 +86,8 @@ def send_telegram_message(message):
     payload = {
         "chat_id": CHAT_ID,
         "text": message,
-        "parse_mode": "Markdown", 
-        "disable_web_page_preview": False # 开启预览以便显示图片
+        "parse_mode": "HTML",  # 【关键修改】改用 HTML 模式，更稳定
+        "disable_web_page_preview": False
     }
     try:
         res = requests.post(url, json=payload)
@@ -112,19 +104,20 @@ if __name__ == "__main__":
     
     if games:
         print(f"🎉 发现 {len(games)} 个免费游戏")
-        
-        # 遍历每个游戏发送一条单独的消息（体验更好，图片显示更准）
         for g in games:
-            # 使用零宽字符 [\u200b] 让 Telegram 抓取图片作为预览，但不显示 URL 文本
+            # HTML 格式构建消息，使用 html.escape 防止描述里的 < > & 符号搞坏格式
+            safe_title = html.escape(g['title'])
+            safe_desc = html.escape(g['description'])
+            
+            # <a href="...">&#8205;</a> 是插入不可见字符用来显示图片预览的技巧
             msg = (
-                f"[\u200b]({g['image']})\n"
-                f"🔥 **Epic 喜加一提醒** 🔥\n\n"
-                f"🎮 **{g['title']}**\n"
+                f"<a href='{g['image']}'>&#8205;</a>"
+                f"🔥 <b>Epic 喜加一提醒</b> 🔥\n\n"
+                f"🎮 <b>{safe_title}</b>\n"
                 f"⏰ 截止: {g['end_date']}\n\n"
-                f"📝 {g['description']}\n\n"
-                f"🔗 [点击领取游戏]({g['link']})"
+                f"📝 {safe_desc}\n\n"
+                f"🔗 <a href='{g['link']}'>点击领取游戏</a>"
             )
             send_telegram_message(msg)
-            
     else:
         print("🤷‍♂️ 当前没有检测到免费游戏 (或接口变动)")
