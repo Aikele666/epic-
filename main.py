@@ -7,102 +7,105 @@ import html
 BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
 CHAT_ID = os.environ.get("TG_CHAT_ID")
 
-def fetch_epic_data(locale="en-US"):
+def get_chinese_title(slug):
     """
-    通用函数：根据语言获取 Epic 数据
+    【新功能】拿着游戏的 Slug 去 Epic 中文详情页接口单独查名字
+    这个接口比大列表接口准得多。
     """
-    # 加上 locale 参数来请求不同语言的数据
-    url = f"https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions?locale={locale}&country=CN&allowCountries=CN"
+    if not slug:
+        return None
+    
+    # Epic 的内容详情接口，支持精准的语言设置
+    url = f"https://store-content.ak.epicgames.com/api/zh-CN/content/products/{slug}"
     try:
-        res = requests.get(url).json()
-        return res['data']['Catalog']['searchStore']['elements']
+        # 伪装成浏览器，防止被拦截
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        res = requests.get(url, headers=headers, timeout=5)
+        
+        if res.status_code == 200:
+            data = res.json()
+            # 不同的游戏数据结构可能略有不同，尝试获取 productTitle 或 title
+            cn_name = data.get('productTitle') or data.get('title')
+            return cn_name
     except Exception as e:
-        print(f"获取 {locale} 数据出错: {e}")
-        return []
+        print(f"查询中文名失败 ({slug}): {e}")
+    
+    return None
 
 def get_epic_free_games():
-    # 1. 获取英文数据 (作为主数据，图片通常更全)
-    games_en = fetch_epic_data("en-US")
-    # 2. 获取中文数据 (用来提取中文标题)
-    games_cn = fetch_epic_data("zh-CN")
-
-    if not games_en:
-        return []
-
-    # 创建一个字典，方便通过 ID 查找中文标题
-    # 格式: { "游戏ID": "中文标题" }
-    cn_title_map = {}
-    if games_cn:
-        for g in games_cn:
-            cn_title_map[g['id']] = g['title']
-
-    free_games = []
-
-    for game in games_en:
-        # ---------------- 过滤逻辑 ----------------
-        promotions = game.get('promotions')
-        if not promotions: continue
-        if not promotions.get('promotionalOffers'): continue
+    # 获取基础列表 (英文为主，用来拿图片和基础信息)
+    url = "https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions?locale=en-US"
+    try:
+        res = requests.get(url).json()
+        games = res['data']['Catalog']['searchStore']['elements']
         
-        # 注释掉 offerType 过滤，防止漏掉大作
-        # offer_type = game.get('offerType')
-        # if offer_type and offer_type != 'BASE_GAME': continue
-
-        offers = promotions['promotionalOffers']
-        if not offers: continue
-
-        is_free = False
-        end_date_str = "未知"
-
-        for offer_group in offers:
-            for offer in offer_group['promotionalOffers']:
-                if offer['discountSetting']['discountPercentage'] == 0:
-                    is_free = True
-                    raw_date = offer.get('endDate')
-                    if raw_date:
-                        try:
-                            dt = datetime.strptime(raw_date.split('.')[0], "%Y-%m-%dT%H:%M:%S")
-                            end_date_str = dt.strftime("%Y-%m-%d %H:%M") + " (UTC)"
-                        except:
-                            end_date_str = raw_date
-                    break
-        
-        # ---------------- 提取信息 ----------------
-        if is_free:
-            title_en = game.get('title')
-            game_id = game.get('id')
+        free_games = []
+        for game in games:
+            # 1. 基础过滤
+            promotions = game.get('promotions')
+            if not promotions: continue
+            if not promotions.get('promotionalOffers'): continue
             
-            # 【新】尝试获取中文标题
-            title_cn = cn_title_map.get(game_id)
+            # 2. 检查价格是否为 0
+            offers = promotions['promotionalOffers']
+            if not offers: continue
+
+            is_free = False
+            end_date_str = "未知"
+
+            for offer_group in offers:
+                for offer in offer_group['promotionalOffers']:
+                    if offer['discountSetting']['discountPercentage'] == 0:
+                        is_free = True
+                        raw_date = offer.get('endDate')
+                        if raw_date:
+                            try:
+                                dt = datetime.strptime(raw_date.split('.')[0], "%Y-%m-%dT%H:%M:%S")
+                                end_date_str = dt.strftime("%Y-%m-%d %H:%M") + " (UTC)"
+                            except:
+                                end_date_str = raw_date
+                        break
             
-            # 如果中文名存在且和英文名不一样，就组合显示
-            # 例如: "Hogwarts Legacy (霍格沃茨之遗)"
-            if title_cn and title_cn != title_en:
-                display_title = f"{title_en} <br/>({title_cn})"
-            else:
+            if is_free:
+                title_en = game.get('title')
+                description = game.get('description', '暂无描述')
+                slug = game.get('productSlug') or game.get('urlSlug')
+                link = f"https://store.epicgames.com/p/{slug}" if slug else "https://store.epicgames.com/free-games"
+                
+                # 图片获取
+                image_url = ""
+                for img in game.get('keyImages', []):
+                    if img.get('type') == 'Thumbnail':
+                        image_url = img.get('url')
+                        break
+                    elif img.get('type') == 'OfferImageWide':
+                        image_url = img.get('url')
+
+                # 【关键修改】单独去查一次中文名
+                print(f"正在查询中文名: {title_en} ({slug})...")
+                title_cn = get_chinese_title(slug)
+                
+                # 只有当中文名存在，且和英文名真的不一样时，才显示双语
+                # (注意：有些游戏 Epic 官方在国区也只填了英文名，那种情况我们就没办法了)
                 display_title = title_en
+                if title_cn and title_cn.strip() != title_en.strip():
+                    display_title = f"{title_en} <br/>({title_cn})"
 
-            description = game.get('description', '暂无描述')
-            slug = game.get('productSlug') or game.get('urlSlug')
-            link = f"https://store.epicgames.com/p/{slug}" if slug else "https://store.epicgames.com/free-games"
-            
-            image_url = ""
-            for img in game.get('keyImages', []):
-                if img.get('type') == 'Thumbnail':
-                    image_url = img.get('url')
-                    break
-                elif img.get('type') == 'OfferImageWide':
-                    image_url = img.get('url')
-
-            free_games.append({
-                "title": display_title,
-                "description": description,
-                "link": link,
-                "image": image_url,
-                "end_date": end_date_str
-            })
-            
-    return free_games
+                free_games.append({
+                    "title": display_title,
+                    "description": description,
+                    "link": link,
+                    "image": image_url,
+                    "end_date": end_date_str
+                })
+                
+        return free_games
+        
+    except Exception as e:
+        print(f"获取 Epic 数据出错: {e}")
+        return []
 
 def send_telegram_message(message):
     if not BOT_TOKEN or not CHAT_ID:
@@ -118,18 +121,18 @@ def send_telegram_message(message):
     }
     try:
         requests.post(url, json=payload)
+        print("✅ 消息推送成功")
     except Exception as e:
         print(f"❌ 推送错误: {e}")
 
 if __name__ == "__main__":
-    print("⏳ 开始检查 Epic 免费游戏 (双语版)...")
+    print("⏳ 开始检查 Epic 免费游戏 (精准中文版)...")
     games = get_epic_free_games()
     
     if games:
         print(f"🎉 发现 {len(games)} 个免费游戏")
         for g in games:
-            # 标题已经是处理过的 HTML 格式 (含<br/>)，不需要再 escape
-            safe_title = g['title'] 
+            safe_title = g['title'] # 已经是安全的 HTML
             safe_desc = html.escape(g['description'])
             
             msg = (
