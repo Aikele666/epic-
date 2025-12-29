@@ -6,7 +6,7 @@ on:
     - cron: '0 23 * * *' # 对应北京时间早上7点
   
   # 允许手动触发
-  workflow_dispatch:
+  
 
 jobs:
   run_script:
