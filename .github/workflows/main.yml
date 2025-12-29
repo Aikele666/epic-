@@ -1,9 +1,9 @@
 name: Epic Free Game Notifier
 
 on:
-  # 定时任务：每天北京时间上午 10:00 运行 (UTC 02:00)
+  workflow_dispatch:
   schedule:
-    - cron: '0 2 * * *'
+    - cron: '0 23 * * *' # 对应北京时间早上7点
   
   # 允许手动触发
   workflow_dispatch:
